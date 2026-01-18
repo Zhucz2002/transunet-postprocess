@@ -23,8 +23,10 @@ pip install -r requirements.txt
 
 ```bash
 python process_segmentation.py \
-  --input /path/to/segmentation.nii.gz \
+  --image /path/to/image.nii.gz \
+  --seg /path/to/segmentation.nii.gz \
   --label 1 \
+  --axis 2 \
   --output outputs
 ```
 
@@ -39,5 +41,6 @@ outputs/
 
 ## Notes
 
-- The overlay draws the organ contour in red on the corresponding slice.
-- Input segmentation must be a 3D volume (z-axis slicing).
+- The overlay draws the organ contour in red on the corresponding image slice.
+- Input image and segmentation must be 3D volumes with matching shapes (default slicing axis is 2).
+- Intensity normalization uses percentile clipping (defaults: pmin=1, pmax=99).
