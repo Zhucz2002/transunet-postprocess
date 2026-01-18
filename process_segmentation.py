@@ -19,13 +19,17 @@ def parse_args() -> argparse.Namespace:
             "slice along z, and export slices/masks/overlays."
         )
     )
-    parser.add_argument("--input", required=True, help="Path to input nii/nii.gz segmentation")
+    parser.add_argument("--image", required=True, help="Path to input nii/nii.gz image volume")
+    parser.add_argument("--seg", required=True, help="Path to input nii/nii.gz segmentation")
     parser.add_argument("--label", type=int, required=True, help="Organ label to extract")
     parser.add_argument(
         "--output",
         default="outputs",
         help="Output directory for slices, masks, overlays",
     )
+    parser.add_argument("--axis", type=int, choices=(0, 1, 2), default=2, help="Axis to slice along")
+    parser.add_argument("--pmin", type=float, default=1.0, help="Lower percentile for intensity clipping")
+    parser.add_argument("--pmax", type=float, default=99.0, help="Upper percentile for intensity clipping")
     return parser.parse_args()
 
 
@@ -33,13 +37,16 @@ def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
-def normalize_to_uint8(slice_data: np.ndarray) -> np.ndarray:
-    if slice_data.dtype == np.uint8:
-        return slice_data
-    max_value = slice_data.max() if slice_data.size > 0 else 0
-    if max_value == 0:
+def normalize_to_uint8(slice_data: np.ndarray, pmin: float, pmax: float) -> np.ndarray:
+    if slice_data.size == 0:
         return slice_data.astype(np.uint8)
-    normalized = (slice_data.astype(np.float32) / max_value) * 255.0
+    if pmin >= pmax:
+        raise ValueError("pmin must be less than pmax")
+    lower, upper = np.percentile(slice_data, [pmin, pmax])
+    if upper <= lower:
+        return np.zeros_like(slice_data, dtype=np.uint8)
+    clipped = np.clip(slice_data, lower, upper)
+    normalized = (clipped - lower) / (upper - lower) * 255.0
     return normalized.astype(np.uint8)
 
 
@@ -57,16 +64,27 @@ def overlay_contours(base_gray: np.ndarray, contours: list[np.ndarray]) -> np.nd
 
 def main() -> None:
     args = parse_args()
-    input_path = Path(args.input)
+    image_path = Path(args.image)
+    seg_path = Path(args.seg)
     output_dir = Path(args.output)
 
-    nii = nib.load(str(input_path))
-    data = np.asarray(nii.get_fdata(), dtype=np.int32)
+    image_nii = nib.load(str(image_path))
+    image_data = np.asarray(image_nii.get_fdata(), dtype=np.float32)
 
-    if data.ndim != 3:
-        raise ValueError(f"Expected a 3D segmentation volume, got shape {data.shape}")
+    seg_nii = nib.load(str(seg_path))
+    seg_data = np.asarray(seg_nii.get_fdata(), dtype=np.int32)
 
-    organ_mask = data == args.label
+    if image_data.ndim != 3:
+        raise ValueError(f"Expected a 3D image volume, got shape {image_data.shape}")
+    if seg_data.ndim != 3:
+        raise ValueError(f"Expected a 3D segmentation volume, got shape {seg_data.shape}")
+    if image_data.shape != seg_data.shape:
+        raise ValueError(
+            "Image and segmentation shapes must match, "
+            f"got {image_data.shape} and {seg_data.shape}"
+        )
+
+    organ_mask = seg_data == args.label
 
     slices_dir = output_dir / "slices"
     masks_dir = output_dir / "masks"
@@ -75,20 +93,20 @@ def main() -> None:
     ensure_dir(masks_dir)
     ensure_dir(overlays_dir)
 
-    depth = data.shape[2]
-    for z in range(depth):
-        slice_data = data[:, :, z]
-        mask_slice = organ_mask[:, :, z]
+    depth = image_data.shape[args.axis]
+    for index in range(depth):
+        slice_data = np.take(image_data, index, axis=args.axis)
+        mask_slice = np.take(organ_mask, index, axis=args.axis)
 
-        slice_uint8 = normalize_to_uint8(slice_data)
-        mask_uint8 = (mask_slice.astype(np.uint8) * 255)
+        slice_uint8 = normalize_to_uint8(slice_data, args.pmin, args.pmax)
+        mask_uint8 = mask_slice.astype(np.uint8) * 255
 
         contours = measure.find_contours(mask_slice.astype(np.uint8), 0.5)
         overlay = overlay_contours(slice_uint8, contours)
 
-        slice_path = slices_dir / f"slice_{z:04d}.png"
-        mask_path = masks_dir / f"mask_{z:04d}.png"
-        overlay_path = overlays_dir / f"overlay_{z:04d}.png"
+        slice_path = slices_dir / f"slice_{index:04d}.png"
+        mask_path = masks_dir / f"mask_{index:04d}.png"
+        overlay_path = overlays_dir / f"overlay_{index:04d}.png"
 
         imageio.imwrite(slice_path, slice_uint8)
         imageio.imwrite(mask_path, mask_uint8)
